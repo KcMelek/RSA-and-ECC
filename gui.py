@@ -151,6 +151,12 @@ def build_ecc_tab(nb):
         e = entry(cf, width=8); e.insert(0,v); e.grid(row=i, column=1, padx=8, pady=3)
         curve_fields[k] = e
 
+    kf = section_frame(top, "Clés privées (ECDH)"); kf.pack(side="left", padx=(0,12), pady=4)
+    label(kf, "dA (Alice):").grid(row=0, column=0, sticky="w", padx=8, pady=4)
+    dA_e = entry(kf, width=10); dA_e.insert(0, "5"); dA_e.grid(row=0, column=1, padx=8, pady=4)
+    label(kf, "dB (Bob):").grid(row=1, column=0, sticky="w", padx=8, pady=4)
+    dB_e = entry(kf, width=10); dB_e.insert(0, "7"); dB_e.grid(row=1, column=1, padx=8, pady=4)
+
     mf = section_frame(top, "Message (signature)"); mf.pack(side="left", padx=(0,12), pady=4)
     label(mf, "Message:").grid(row=0, column=0, padx=8, pady=4)
     msg_e = entry(mf, width=20); msg_e.insert(0,"Hello Crypto!"); msg_e.grid(row=0,column=1,padx=8,pady=4)
@@ -188,23 +194,26 @@ def build_ecc_tab(nb):
         clear_term(term)
         cap = TermCapture(term); old=sys.stdout; sys.stdout=cap
         try:
-            from modules.ecc_module import Curve, Point, ECDH, scalar_mult
+            from modules.ecc_module import Curve, Point, scalar_mult
             c, G = get_curve()
-            pts = c.list_points(); order = len(pts)+1
-            # compute real order
-            tmp=G; ord_G=1
-            from modules.ecc_module import scalar_mult
-            while scalar_mult(ord_G+1,G,c) is not None and ord_G<500:
-                ord_G+=1
+            # compute real order (naif)
+            ord_G=1
+            while scalar_mult(ord_G+1, G, c) is not None and ord_G < 5000:
+                ord_G += 1
             print(f"\n  Courbe : {c}")
             print(f"  G = {G}, ordre = {ord_G}")
-            ecdh = ECDH(c,G,ord_G)
-            ka,Pa = ecdh.generate_keypair()
-            print(f"\n  Alice : priv={ka}, pub={Pa}")
-            kb,Pb = ecdh.generate_keypair()
-            print(f"  Bob   : priv={kb}, pub={Pb}")
-            Sa = ecdh.shared_secret(ka,Pb)
-            Sb = ecdh.shared_secret(kb,Pa)
+            dA = int(dA_e.get()); dB = int(dB_e.get())
+            if not (1 <= dA < ord_G) or not (1 <= dB < ord_G):
+                raise ValueError(f"dA et dB doivent être dans [1, ordre(G)-1] = [1, {ord_G-1}]")
+
+            # même point G pour Alice & Bob
+            Pa = scalar_mult(dA, G, c)
+            Pb = scalar_mult(dB, G, c)
+            print(f"\n  Alice : dA={dA}, Qa=dA*G={Pa}")
+            print(f"  Bob   : dB={dB}, Qb=dB*G={Pb}")
+
+            Sa = scalar_mult(dA, Pb, c)
+            Sb = scalar_mult(dB, Pa, c)
             print(f"\n  Secret Alice = {Sa}")
             print(f"  Secret Bob   = {Sb}")
             print(f"\n  Accord ECDH : {'[OK]' if Sa==Sb else '[ERREUR]'}")
@@ -269,6 +278,23 @@ def build_attack_tab(nb):
     af = section_frame(top,"Actions"); af.pack(side="left",pady=4)
     term = make_term(tab,20); term.pack(fill="both",expand=True,padx=16,pady=(0,12))
 
+    # Step-by-step options (trace)
+    vf = section_frame(top, "Step-by-step"); vf.pack(side="left", padx=(12, 0), pady=4)
+    verbose_var = tk.BooleanVar(value=False)
+    tk.Checkbutton(
+        vf,
+        text="Afficher étapes (verbose)",
+        variable=verbose_var,
+        bg=BG2,
+        fg=TEXT,
+        selectcolor=BG3,
+        activebackground=BG2,
+        activeforeground=TEXT,
+        font=FONT,
+    ).pack(anchor="w", padx=10, pady=(8, 2))
+    label(vf, "Log chaque N itérations:").pack(anchor="w", padx=10, pady=(6, 2))
+    every_e = entry(vf, width=8); every_e.insert(0, "25"); every_e.pack(anchor="w", padx=10, pady=(0, 8))
+
     def run_rho():
         clear_term(term)
         cap=TermCapture(term); old=sys.stdout; sys.stdout=cap
@@ -276,7 +302,10 @@ def build_attack_tab(nb):
             try:
                 from modules.attacks_module import factor_rsa, pollard_rho
                 n=int(n_e.get())
-                p,q=factor_rsa(n)
+                verbose = bool(verbose_var.get())
+                every = int(every_e.get() or "25")
+                trace = [] if verbose else None
+                p,q=factor_rsa(n, verbose=verbose, log_every=every, trace=trace)
                 t=pollard_rho._last_elapsed
                 if p:
                     print(f"\n  [OK] {n} = {p} x {q}")
@@ -284,6 +313,10 @@ def build_attack_tab(nb):
                     phi=(p-1)*(q-1)
                     print(f"  phi(n) = {phi}")
                     print(f"  => La cle privee RSA est recalculable !")
+                    if verbose and trace:
+                        print("\n  --- TRACE (Pollard's Rho) ---")
+                        for line in trace[-500:]:
+                            print(f"  {line}")
                 else:
                     print(f"\n  [ECHEC] Factorisation de {n} echouee.")
             except Exception as ex:
@@ -309,11 +342,18 @@ def build_attack_tab(nb):
                 print(f"  Cle privee reelle : k = {priv}")
                 print(f"  Cle publique Q = k*G = {Q}")
                 print(f"\n  Lancement BSGS...")
-                k=bsgs_ecc(G,Q,c,order)
+                verbose = bool(verbose_var.get())
+                every = int(every_e.get() or "1")
+                trace = [] if verbose else None
+                k=bsgs_ecc(G,Q,c,order, verbose=verbose, log_every=every, trace=trace)
                 if k is not None:
                     print(f"\n  [OK] Cle retrouvee : k = {k}")
                     verify=scalar_mult(k,G,c)
                     print(f"  Verification : {k}*G = {verify} == {Q} : {verify==Q}")
+                    if verbose and trace:
+                        print("\n  --- TRACE (BSGS) ---")
+                        for line in trace[-800:]:
+                            print(f"  {line}")
                 else:
                     print(f"\n  [ECHEC] Cle non retrouvee.")
             except Exception as ex:

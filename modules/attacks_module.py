@@ -44,8 +44,20 @@ def _gcd(a: int, b: int) -> int:
     return a
 
 
+def _trace(trace: Optional[list[str]], msg: str) -> None:
+    if trace is not None:
+        trace.append(msg)
+
+
 @timer
-def pollard_rho(n: int, max_iter: int = 100_000) -> Optional[int]:
+def pollard_rho(
+    n: int,
+    max_iter: int = 100_000,
+    *,
+    verbose: bool = False,
+    log_every: int = 1,
+    trace: Optional[list[str]] = None,
+) -> Optional[int]:
     """
     Algorithme de Pollard's Rho pour factoriser n.
 
@@ -67,8 +79,10 @@ def pollard_rho(n: int, max_iter: int = 100_000) -> Optional[int]:
         pollard_rho(323)  # 323 = 17 x 19  ->  retourne 17 ou 19
     """
     if n % 2 == 0:
+        _trace(trace, "n est pair -> facteur 2")
         return 2
     if n == 1:
+        _trace(trace, "n=1 -> pas de facteur")
         return None
 
     for c in range(1, 20):          # Essai avec plusieurs constantes c
@@ -78,37 +92,54 @@ def pollard_rho(n: int, max_iter: int = 100_000) -> Optional[int]:
 
         f = lambda v: (v * v + c) % n    # Fonction pseudo-aléatoire
 
+        _trace(trace, f"Essai avec c={c}, init x=y=2, d=1")
         iterations = 0
         while d == 1 and iterations < max_iter:
             x = f(x)            # Tortue : avance d'un pas
             y = f(f(y))         # Lièvre : avance de deux pas
             d = _gcd(abs(x - y), n)
             iterations += 1
+            if verbose and log_every > 0 and (iterations % log_every == 0):
+                _trace(trace, f"it={iterations}: x={x}, y={y}, |x-y|={abs(x-y)}, gcd={d}")
 
         if 1 < d < n:
-            print(f"  [Pollard rho] Facteur trouvé : {d}  (apres {iterations} iterations, c={c})")
+            msg = f"Facteur trouvé: d={d} (apres {iterations} iterations, c={c})"
+            _trace(trace, msg)
+            print(f"  [Pollard rho] {msg}")
             return d
         # Si d == n : relancer avec un autre c
-        print(f"  [Pollard rho] c={c} -> cycle degenere, changement de constante...")
+        msg = f"c={c} -> cycle degenere (d=n), changement de constante..."
+        _trace(trace, msg)
+        print(f"  [Pollard rho] {msg}")
 
     print(f"  [Pollard rho] Echec : n={n} resiste (peut-etre premier ou trop grand).")
+    _trace(trace, f"Echec: aucun facteur trouve (max_iter={max_iter}, c=1..19)")
     return None
 
 
-def factor_rsa(n: int) -> tuple[Optional[int], Optional[int]]:
+def factor_rsa(
+    n: int,
+    *,
+    verbose: bool = False,
+    log_every: int = 1,
+    trace: Optional[list[str]] = None,
+) -> tuple[Optional[int], Optional[int]]:
     """
     Factorise n = p·q en utilisant Pollard's Rho.
     Retourne (p, q) ou (None, None) si échec.
     """
     print(f"\n  == Factorisation RSA : n = {n} ==")
-    p = pollard_rho(n)
+    _trace(trace, f"Debut factorisation: n={n}")
+    p = pollard_rho(n, verbose=verbose, log_every=log_every, trace=trace)
     if p is None:
         return None, None
     q = n // p
     # Vérification
     if p * q == n:
         print(f"  [OK] Factorisation reussie : {n} = {p} x {q}")
+        _trace(trace, f"OK: {n} = {p} x {q}")
         return p, q
+    _trace(trace, "Echec verification: p*q != n")
     return None, None
 
 
@@ -117,7 +148,16 @@ def factor_rsa(n: int) -> tuple[Optional[int], Optional[int]]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @timer
-def bsgs_ecc(G, Q, curve, order: int) -> Optional[int]:
+def bsgs_ecc(
+    G,
+    Q,
+    curve,
+    order: int,
+    *,
+    verbose: bool = False,
+    log_every: int = 1,
+    trace: Optional[list[str]] = None,
+) -> Optional[int]:
     """
     Baby-Step Giant-Step pour résoudre le logarithme discret ECC :
         Trouver k tel que k·G = Q  sur la courbe.
@@ -144,18 +184,22 @@ def bsgs_ecc(G, Q, curve, order: int) -> Optional[int]:
     from .ecc_module import scalar_mult, point_add, point_double
 
     if Q is None:                  # Q = O -> k = 0
+        _trace(trace, "Q = O (point a l'infini) -> k = 0")
         return 0
 
     m = math.isqrt(order) + 1     # m = ceil(sqrt(order))
 
     # ── Baby Steps : table {j·G -> j} ─────────────────────────────────────
     print(f"  [BSGS] Calcul des baby-steps (m = {m})...")
+    _trace(trace, f"Parametres: order={order}, m=ceil(sqrt(order))={m}")
     baby_table: dict = {}
     current = None                 # 0·G = O
 
     for j in range(m):
         key = (current.x, current.y) if current else "inf"
         baby_table[key] = j
+        if verbose and log_every > 0 and (j % log_every == 0):
+            _trace(trace, f"baby j={j}: P={current} (key={key})")
         current = point_add(current, G, curve)
 
     # ── Giant Steps : cherche Q - i·(m·G) ─────────────────────────────────
@@ -167,17 +211,22 @@ def bsgs_ecc(G, Q, curve, order: int) -> Optional[int]:
         neg_mG_obj = neg_mG
 
     print(f"  [BSGS] Recherche giant-steps (<= {m} iterations)...")
+    _trace(trace, f"mG = {mG}, -mG = {neg_mG_obj}")
     gamma = Q                                 # Q - 0·(m·G)
 
     for i in range(m):
         key = (gamma.x, gamma.y) if gamma else "inf"
+        if verbose and log_every > 0 and (i % log_every == 0):
+            _trace(trace, f"giant i={i}: gamma={gamma} (key={key})")
         if key in baby_table:
             j = baby_table[key]
             k = i * m + j
-            if k > 0:
-                print(f"  [BSGS OK] Cle privee retrouvee : k = {k}  (i={i}, j={j})")
-                return k
+            msg = f"Match: gamma == baby[j] avec (i={i}, j={j}) -> k={k}"
+            _trace(trace, msg)
+            print(f"  [BSGS OK] {msg}")
+            return k
         gamma = point_add(gamma, neg_mG_obj, curve)
 
     print(f"  [BSGS ✗] Logarithme discret introuvable dans [0, {order}].")
+    _trace(trace, f"Echec: aucun match dans i=0..{m-1}")
     return None

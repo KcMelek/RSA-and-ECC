@@ -222,36 +222,68 @@ def ecc_tab():
     order: Optional[int] = st.session_state.get("ecc_order")
 
     st.divider()
+    st.markdown("**Courbe (visualisation des points sur F_p)**")
+    if curve is None:
+        st.info("Initialisez d'abord la courbe et G pour afficher la courbe.")
+    else:
+        show_pts = st.checkbox("Afficher les points (scatter)", value=True)
+        max_p_plot = st.number_input("Max p pour afficher (sécurité perf)", min_value=3, value=251, step=1)
+        if show_pts:
+            if int(curve.p) > int(max_p_plot):
+                st.warning(f"p={curve.p} est trop grand pour un affichage brut des points. Baissez p ou augmentez la limite.")
+            else:
+                try:
+                    pts, ns_pts = _perf_call(curve.list_points)
+                    _add_timing("ECC", "list_points", ns_pts, details=f"p={curve.p}, count={len(pts)}")
+                    df = pd.DataFrame([{"x": pt.x, "y": pt.y} for pt in pts])
+                    st.caption(f"Points affines: {len(pts)} (+ point à l'infini). Temps exact: {ns_pts} ns ({ns_pts/1e6:.3f} ms)")
+                    st.scatter_chart(df, x="x", y="y", use_container_width=True)
+                except Exception as ex:
+                    st.error(str(ex))
+
+    st.divider()
     st.markdown("**Échange de clés (ECDH)**")
-    ecdh_btn = st.button("Exécuter ECDH", type="primary", use_container_width=True)
+    k1, k2 = st.columns([1, 1])
+    with k1:
+        dA = st.number_input("Clé privée Alice dA", min_value=1, value=5, step=1)
+    with k2:
+        dB = st.number_input("Clé privée Bob dB", min_value=1, value=7, step=1)
+
+    ecdh_btn = st.button("Générer clés publiques et secret partagé", type="primary", use_container_width=True)
     if ecdh_btn:
         if curve is None or G is None or order is None:
             st.error("Initialisez d'abord la courbe et G.")
         else:
             try:
-                ecdh = ECDH(curve, G, int(order))
-                (ka, Qa), ns_ka = _perf_call(ecdh.generate_keypair)
-                (kb, Qb), ns_kb = _perf_call(ecdh.generate_keypair)
-                Sa, ns_sa = _perf_call(ecdh.shared_secret, ka, Qb)
-                Sb, ns_sb = _perf_call(ecdh.shared_secret, kb, Qa)
+                dA_i = int(dA)
+                dB_i = int(dB)
+                if not (1 <= dA_i < int(order)) or not (1 <= dB_i < int(order)):
+                    raise ValueError(f"dA et dB doivent être dans [1, ordre(G)-1] = [1, {int(order)-1}]")
 
-                _add_timing("ECC", "generate_keypair", ns_ka, details="Alice")
-                _add_timing("ECC", "generate_keypair", ns_kb, details="Bob")
-                _add_timing("ECC", "shared_secret", ns_sa, details="Alice")
-                _add_timing("ECC", "shared_secret", ns_sb, details="Bob")
+                # même G pour Alice & Bob
+                Qa, ns_Qa = _perf_call(scalar_mult, dA_i, G, curve)
+                Qb, ns_Qb = _perf_call(scalar_mult, dB_i, G, curve)
+                Sa, ns_sa = _perf_call(scalar_mult, dA_i, Qb, curve)  # dA*Qb
+                Sb, ns_sb = _perf_call(scalar_mult, dB_i, Qa, curve)  # dB*Qa
+
+                _add_timing("ECC", "pubkey", ns_Qa, details="Alice: Qa=dA*G")
+                _add_timing("ECC", "pubkey", ns_Qb, details="Bob: Qb=dB*G")
+                _add_timing("ECC", "shared_secret", ns_sa, details="Alice: Sa=dA*Qb")
+                _add_timing("ECC", "shared_secret", ns_sb, details="Bob: Sb=dB*Qa")
 
                 st.code(
                     "\n".join(
                         [
-                            f"Alice: priv={ka}, pub={Qa}",
-                            f"Bob  : priv={kb}, pub={Qb}",
+                            f"Paramètres: courbe={curve}, G={G}, ordre(G)={int(order)}",
+                            f"Alice: dA={dA_i}, Qa=dA*G={Qa}",
+                            f"Bob  : dB={dB_i}, Qb=dB*G={Qb}",
                             f"Secret Alice: {Sa}",
                             f"Secret Bob  : {Sb}",
                             f"Accord: {Sa == Sb}",
                         ]
                     )
                 )
-                st.caption(f"Temps exact (ns): keypair(A)={ns_ka}, keypair(B)={ns_kb}, secret(A)={ns_sa}, secret(B)={ns_sb}")
+                st.caption(f"Temps exact (ns): Qa={ns_Qa}, Qb={ns_Qb}, Sa={ns_sa}, Sb={ns_sb}")
             except Exception as ex:
                 st.error(str(ex))
 
@@ -335,10 +367,13 @@ def attacks_tab():
 
     st.markdown("**RSA — Pollard's Rho (factorisation)**")
     n = st.number_input("n (à factoriser)", min_value=3, value=323, step=1)
+    rsa_verbose = st.checkbox("Afficher étapes (step-by-step) — RSA", value=False)
+    rsa_every = st.number_input("Log chaque N itérations (RSA)", min_value=1, value=25, step=1, disabled=(not rsa_verbose))
     rho_btn = st.button("Lancer Pollard's Rho", type="primary", use_container_width=True)
     if rho_btn:
         try:
-            (pq, ns) = _perf_call(factor_rsa, int(n))
+            trace: list[str] = [] if rsa_verbose else None
+            (pq, ns) = _perf_call(factor_rsa, int(n), verbose=rsa_verbose, log_every=int(rsa_every), trace=trace)
             # factor_rsa appelle pollard_rho décoré; on prend l'exact de perf_call ici
             _add_timing("ATK", "pollard_rho", ns, details=f"n={n}")
             p, q = pq
@@ -347,6 +382,9 @@ def attacks_tab():
             else:
                 st.success(f"Factorisation: {n} = {p} × {q}")
             st.caption(f"Temps exact: {ns} ns ({ns/1e6:.3f} ms)")
+            if rsa_verbose and trace is not None:
+                st.markdown("**Étapes Pollard's Rho (trace)**")
+                st.code("\n".join(trace[-2000:]))  # limite pour éviter un bloc énorme
         except Exception as ex:
             st.error(str(ex))
 
@@ -363,16 +401,23 @@ def attacks_tab():
         order = st.number_input("ordre", min_value=2, value=19, step=1, key="atk_order")
         k_real = st.number_input("clé privée k (pour générer Q)", min_value=0, value=9, step=1, key="atk_k")
 
+    ecc_verbose = st.checkbox("Afficher étapes (step-by-step) — ECC", value=False)
+    ecc_every = st.number_input("Log chaque N itérations (ECC)", min_value=1, value=1, step=1, disabled=(not ecc_verbose))
+
     bsgs_btn = st.button("Lancer BSGS", use_container_width=True)
     if bsgs_btn:
         try:
             curve = Curve(int(a), int(b), int(p), "ATK")
             G = Point(int(gx), int(gy), curve)
             Q = scalar_mult(int(k_real), G, curve)
-            k_found, ns = _perf_call(bsgs_ecc, G, Q, curve, int(order))
+            trace2: list[str] = [] if ecc_verbose else None
+            k_found, ns = _perf_call(bsgs_ecc, G, Q, curve, int(order), verbose=ecc_verbose, log_every=int(ecc_every), trace=trace2)
             _add_timing("ATK", "bsgs_ecc", ns, details=f"found={k_found}")
             st.code(f"Q = k*G = {Q}\nTrouvé k = {k_found}\nOK = {k_found == int(k_real)}")
             st.caption(f"Temps exact: {ns} ns ({ns/1e6:.3f} ms)")
+            if ecc_verbose and trace2 is not None:
+                st.markdown("**Étapes BSGS (trace)**")
+                st.code("\n".join(trace2[-4000:]))
         except Exception as ex:
             st.error(str(ex))
 
@@ -410,7 +455,7 @@ def main():
     st.set_page_config(page_title="CryptoValidator — Streamlit", layout="wide")
     _init_state()
 
-    st.title("CryptoValidator — Interface Streamlit")
+    st.title("CryptoValidator ")
     st.caption("RSA | ECC (courbes non standards) | Attaques | Validation croisée — avec temps d'exécution exact par opération.")
 
     tabs = st.tabs(["RSA", "ECC", "Attaques", "Validation croisée"])
